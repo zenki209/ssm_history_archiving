@@ -154,4 +154,4 @@ def lambda_handler(event, context):
             )
             cmd_history.append(execution_command)
 
-    return len(cmd_history)  # write_result(cmd_history)
+    return len(cmd_history), write_result(cmd_history)
