@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from collections import defaultdict
 import boto3
 import botocore
 import csv
@@ -23,14 +24,6 @@ marker = None
 pages = paginator_ssm.paginate(
     PaginationConfig={"PageSize": 5, "StartingToken": marker}
 )
-
-
-class SSM_command:
-    def __init__(self, id, document_name, run_date, status):
-        self.id = id
-        self.document_name = document_name
-        self.run_date = run_date.strftime("%d/%b/%Y %H:%M:%S")
-        self.status = status
 
 
 def download_from_s3(file_name):
@@ -83,20 +76,22 @@ def write_result(list_commands):
         with open(local_file_path) as f:
             before_append_lines = sum(1 for line in f)
 
-    with open(local_file_path, mode, newline="") as csvfile:
-        writer = csv.writer(csvfile)
+    with open(report_name, mode, encoding="UTF8", newline="") as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=field_names)
         if current_month == 1 or report_existed == 1:
-            writer.writerow(field_names)
-        # Write Data to File
-        for command in list_commands:
+            writer.writeheader()
+        for k, v in list_commands.items():
+            target_states = [i for i in v["TargetStatus"]]
+            format_target_states = ",".join(target_states)
+            print(format_target_states)
             writer.writerow(
-                [
-                    command.id,
-                    command.document_name,
-                    command.run_date,
-                    command.status,
-                    command.ids_states,
-                ]
+                {
+                    "CommandId": k,
+                    "DocumentName": v["DocumentName"],
+                    "RunTime": v["RunTime"],
+                    "Status": v["Status"],
+                    "TargetsStatus": format_target_states,
+                }
             )
 
     with open(local_file_path) as f:
@@ -110,48 +105,40 @@ def write_result(list_commands):
         after_append_lines,
     )
 
-    # return lines
 
-
-class SSM_command:
-    def __init__(self, id, document_name, run_date, status, instances):
-        self.id = id
-        self.document_name = document_name
-        self.run_date = run_date.strftime("%d/%b/%Y %H:%M:%S")
-        self.status = status
-
-        # return the list of instance for each cmd_id
-        ids_states = []
-        for instance in instances:
-            state_response = ssm.list_commands(CommandId=id, InstanceId=instance)
-            id_state = instance + ":" + state_response["Commands"][0]["Status"]
-            ids_states.append(id_state)
-        self.ids_states = ids_states
+def target_status(instances, cmd_id):
+    ids_states = []
+    for id in instances:
+        state_response = ssm.list_commands(CommandId=cmd_id, InstanceId=id)
+        id_state = id + ":" + state_response["Commands"][0]["Status"]
+        ids_states.append(id_state)
+    return ids_states
 
 
 def lambda_handler(event, context):
 
-    cmd_history = []
+    ssm_history = defaultdict()
 
     for page in pages:
         list_ex_cmds = page["Commands"]
         # filter the list_execute_commands with the document name only
         filter_list_cmds = list(
             filter(
-                lambda list_ex_cmds: list_ex_cmds["DocumentName"] == document_name,
+                lambda list_ex_cmds: list_ex_cmds["DocumentName"] in document_name,
                 list_ex_cmds,
             )
         )
         if len(filter_list_cmds) <= 0:
             continue
         for exe_cmd in filter_list_cmds:
-            execution_command = SSM_command(
-                exe_cmd["CommandId"],
-                exe_cmd["DocumentName"],
-                exe_cmd["RequestedDateTime"],
-                exe_cmd["Status"],
-                exe_cmd["Targets"][0]["Values"],
-            )
-            cmd_history.append(execution_command)
+            ssm_history[exe_cmd["CommandId"]] = {
+                "CommandId": exe_cmd["CommandId"],
+                "DocumentName": exe_cmd["DocumentName"],
+                "RunTime": exe_cmd["RequestedDateTime"].strftime("%d/%b/%Y %H:%M:%S"),
+                "Status": exe_cmd["Status"],
+                "TargetStatus": target_status(
+                    exe_cmd["Targets"][0]["Values"], exe_cmd["CommandId"]
+                ),
+            }
 
-    return len(cmd_history), write_result(cmd_history)
+    return len(ssm_history), write_result(ssm_history)
